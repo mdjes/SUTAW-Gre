@@ -12,10 +12,10 @@ UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
 
 echo -e "${CYAN}"
 echo "===================================="
-echo "        GitHub: SUTAW"
+echo "          GitHub: SUTAW"
 echo "   SUTAW-Gre Tunnel Setup Script"
 echo "------------------------------------"
-echo "        Telegram: T.ME/SUTAW"
+echo "           T.ME/SUTAW"
 echo "===================================="
 echo -e "${RESET}"
 
