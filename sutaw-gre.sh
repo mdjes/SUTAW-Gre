@@ -17,7 +17,11 @@ echo -e "${RESET}"
 echo "Select option:"
 echo "1 - IRAN (Create Tunnel)"
 echo "2 - FOREIGN (Create Tunnel)"
-echo "3 - DELETE Tunnel"
+echo "3 - DELETE Tunnel (Remove tunnel and firewall rules)"
+echo
+echo "Telegram: T.ME/SUTAW"
+echo
+
 read -p "Enter 1, 2 or 3: " OPTION
 
 if [[ "$OPTION" == "1" || "$OPTION" == "2" ]]; then
@@ -54,11 +58,11 @@ elif [[ "$OPTION" == "2" ]]; then
 elif [[ "$OPTION" == "3" ]]; then
     echo -e "${RED}[*] Deleting SUTAW-Gre tunnel and rules...${RESET}"
 
-    # حذف تونل
+    # Remove tunnel
     sudo ip link set $TUN_NAME down 2>/dev/null
     sudo ip tunnel del $TUN_NAME 2>/dev/null
 
-    # پاکسازی iptables
+    # Cleanup iptables rules
     iptables -t nat -D PREROUTING -p tcp --dport 22 -j DNAT --to-destination 132.168.30.2 2>/dev/null
     iptables -t nat -D PREROUTING -j DNAT --to-destination 132.168.30.1 2>/dev/null
     iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null
