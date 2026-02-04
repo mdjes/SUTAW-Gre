@@ -11,6 +11,8 @@ echo -e "${CYAN}"
 echo "===================================="
 echo "        GitHub: SUTAW"
 echo "   SUTAW-Gre Tunnel Setup Script"
+echo "------------------------------------"
+echo "        Telegram: T.ME/SUTAW"
 echo "===================================="
 echo -e "${RESET}"
 
@@ -18,11 +20,15 @@ echo "Select option:"
 echo "1 - IRAN (Create Tunnel)"
 echo "2 - FOREIGN (Create Tunnel)"
 echo "3 - DELETE Tunnel (Remove tunnel and firewall rules)"
-echo
-echo "Telegram: T.ME/SUTAW"
+echo "4 - EXIT"
 echo
 
-read -p "Enter 1, 2 or 3: " OPTION
+read -p "Enter 1, 2, 3 or 4: " OPTION
+
+if [[ "$OPTION" == "4" ]]; then
+    echo "[*] Exit."
+    exit 0
+fi
 
 if [[ "$OPTION" == "1" || "$OPTION" == "2" ]]; then
     read -p "Enter IRAN server IP: " IP_IRAN
