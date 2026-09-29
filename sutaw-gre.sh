@@ -12,7 +12,7 @@ RESET=$(tput sgr0)
 # ==========================================
 # Variables
 # ==========================================
-VERSION="V-1.6"
+VERSION="V-1.7"
 TUN_NAME="SUTAW-Gre"
 UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
 SERVICE_FILE="/etc/systemd/system/sutaw-gre.service"
@@ -22,18 +22,18 @@ STARTUP_SCRIPT="/usr/local/bin/sutaw-gre-boot.sh"
 # Root Privilege Check
 # ==========================================
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}[!] This script must be run as root. Use 'sudo mdtun'${RESET}"
+   echo -e "${RED}[!] This script must be run as root. (Use 'sudo -i' first)${RESET}"
    exit 1
 fi
 
 # ==========================================
-# Auto Install as Global Command (sudo mdtun)
+# Auto Install as Global Command (mdtun)
 # ==========================================
-CURRENT_SCRIPT=$(readlink -f "$0")
-if [[ "$CURRENT_SCRIPT" != "/usr/local/bin/mdtun" ]]; then
-    cp "$CURRENT_SCRIPT" /usr/local/bin/mdtun 2>/dev/null
+if [[ ! -f "/usr/local/bin/mdtun" ]]; then
+    echo -e "${YELLOW}[*] Installing mdtun command globally...${RESET}"
+    curl -fsSL "$UPDATE_URL" -o /usr/local/bin/mdtun 2>/dev/null
     chmod +x /usr/local/bin/mdtun 2>/dev/null
-    echo -e "${GREEN}[✓] Global Command Installed! You can now use 'sudo mdtun' from anywhere.${RESET}"
+    echo -e "${GREEN}[✓] Global Command Installed! Next time just type: mdtun${RESET}"
     sleep 2
 fi
 
@@ -46,7 +46,7 @@ echo "===================================="
 echo "          GitHub: SUTAW"
 echo "   SUTAW-Gre Tunnel Setup Script"
 echo "             Version: $VERSION"
-echo "     Run anytime with: sudo mdtun"
+echo "     Run anytime with: mdtun"
 echo "------------------------------------"
 echo "           T.ME/SUTAW"
 echo "===================================="
@@ -214,12 +214,8 @@ elif [[ "$OPTION" == "7" ]]; then
         chmod +x /usr/local/bin/mdtun
         rm -f "$TMP_FILE"
         
-        if [[ "$CURRENT_SCRIPT" != "/usr/local/bin/mdtun" && -f "$CURRENT_SCRIPT" ]]; then
-            cat /usr/local/bin/mdtun > "$CURRENT_SCRIPT"
-        fi
-        
         echo -e "${GREEN}[✓] Update completed successfully.${RESET}"
-        echo -e "${GREEN}[*] Please re-run using command: ${YELLOW}sudo mdtun${RESET}"  
+        echo -e "${GREEN}[*] Please re-run using command: ${YELLOW}mdtun${RESET}"  
         exit 0
     else
         echo -e "${RED}[!] Update failed. Network issue or GitHub URL is invalid.${RESET}"
