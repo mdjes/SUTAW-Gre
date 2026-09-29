@@ -12,6 +12,7 @@ RESET=$(tput sgr0)
 # ==========================================
 # Variables
 # ==========================================
+VERSION="V-1.5"
 TUN_NAME="SUTAW-Gre"
 SCRIPT_NAME="sutaw-gre.sh"
 UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
@@ -34,6 +35,7 @@ echo -e "${CYAN}"
 echo "===================================="
 echo "          GitHub: SUTAW"
 echo "   SUTAW-Gre Tunnel Setup Script"
+echo "             Version: $VERSION"
 echo "------------------------------------"
 echo "           T.ME/SUTAW"
 echo "===================================="
