@@ -12,9 +12,8 @@ RESET=$(tput sgr0)
 # ==========================================
 # Variables
 # ==========================================
-VERSION="V-1.5"
+VERSION="V-1.6"
 TUN_NAME="SUTAW-Gre"
-SCRIPT_NAME="sutaw-gre.sh"
 UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
 SERVICE_FILE="/etc/systemd/system/sutaw-gre.service"
 STARTUP_SCRIPT="/usr/local/bin/sutaw-gre-boot.sh"
@@ -23,8 +22,19 @@ STARTUP_SCRIPT="/usr/local/bin/sutaw-gre-boot.sh"
 # Root Privilege Check
 # ==========================================
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}[!] This script must be run as root. Use 'sudo bash $SCRIPT_NAME'${RESET}"
+   echo -e "${RED}[!] This script must be run as root. Use 'sudo mdtun'${RESET}"
    exit 1
+fi
+
+# ==========================================
+# Auto Install as Global Command (sudo mdtun)
+# ==========================================
+CURRENT_SCRIPT=$(readlink -f "$0")
+if [[ "$CURRENT_SCRIPT" != "/usr/local/bin/mdtun" ]]; then
+    cp "$CURRENT_SCRIPT" /usr/local/bin/mdtun 2>/dev/null
+    chmod +x /usr/local/bin/mdtun 2>/dev/null
+    echo -e "${GREEN}[✓] Global Command Installed! You can now use 'sudo mdtun' from anywhere.${RESET}"
+    sleep 2
 fi
 
 # ==========================================
@@ -36,6 +46,7 @@ echo "===================================="
 echo "          GitHub: SUTAW"
 echo "   SUTAW-Gre Tunnel Setup Script"
 echo "             Version: $VERSION"
+echo "     Run anytime with: sudo mdtun"
 echo "------------------------------------"
 echo "           T.ME/SUTAW"
 echo "===================================="
@@ -196,13 +207,19 @@ elif [[ "$OPTION" == "6" ]]; then
 
 elif [[ "$OPTION" == "7" ]]; then
     echo -e "${YELLOW}[*] Updating SUTAW-Gre core from GitHub...${RESET}"
-    curl -fsSL "$UPDATE_URL" -o "/tmp/$SCRIPT_NAME" || {  
+    curl -fsSL "$UPDATE_URL" -o "/usr/local/bin/mdtun" || {  
         echo -e "${RED}[!] Update failed. Network or GitHub issue.${RESET}"  
         exit 1  
     }  
-    mv "/tmp/$SCRIPT_NAME" "./$SCRIPT_NAME"  
-    chmod +x "./$SCRIPT_NAME"  
-    echo -e "${GREEN}[✓] Update completed successfully. Please re-run the script.${RESET}"  
+    chmod +x "/usr/local/bin/mdtun"
+    
+    # If the user ran the script from a file (not the global command), update that file too
+    if [[ "$CURRENT_SCRIPT" != "/usr/local/bin/mdtun" ]]; then
+        cp "/usr/local/bin/mdtun" "$CURRENT_SCRIPT"
+    fi
+    
+    echo -e "${GREEN}[✓] Update completed successfully.${RESET}"
+    echo -e "${GREEN}[*] Please re-run using command: ${YELLOW}sudo mdtun${RESET}"  
     exit 0
 
 elif [[ "$OPTION" == "8" ]]; then
