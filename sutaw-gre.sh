@@ -207,20 +207,25 @@ elif [[ "$OPTION" == "6" ]]; then
 
 elif [[ "$OPTION" == "7" ]]; then
     echo -e "${YELLOW}[*] Updating SUTAW-Gre core from GitHub...${RESET}"
-    curl -fsSL "$UPDATE_URL" -o "/usr/local/bin/mdtun" || {  
-        echo -e "${RED}[!] Update failed. Network or GitHub issue.${RESET}"  
-        exit 1  
-    }  
-    chmod +x "/usr/local/bin/mdtun"
     
-    # If the user ran the script from a file (not the global command), update that file too
-    if [[ "$CURRENT_SCRIPT" != "/usr/local/bin/mdtun" ]]; then
-        cp "/usr/local/bin/mdtun" "$CURRENT_SCRIPT"
+    TMP_FILE=$(mktemp)
+    if curl -fsSL "$UPDATE_URL" -o "$TMP_FILE"; then
+        cat "$TMP_FILE" > /usr/local/bin/mdtun
+        chmod +x /usr/local/bin/mdtun
+        rm -f "$TMP_FILE"
+        
+        if [[ "$CURRENT_SCRIPT" != "/usr/local/bin/mdtun" && -f "$CURRENT_SCRIPT" ]]; then
+            cat /usr/local/bin/mdtun > "$CURRENT_SCRIPT"
+        fi
+        
+        echo -e "${GREEN}[✓] Update completed successfully.${RESET}"
+        echo -e "${GREEN}[*] Please re-run using command: ${YELLOW}sudo mdtun${RESET}"  
+        exit 0
+    else
+        echo -e "${RED}[!] Update failed. Network issue or GitHub URL is invalid.${RESET}"
+        rm -f "$TMP_FILE"
+        exit 1
     fi
-    
-    echo -e "${GREEN}[✓] Update completed successfully.${RESET}"
-    echo -e "${GREEN}[*] Please re-run using command: ${YELLOW}sudo mdtun${RESET}"  
-    exit 0
 
 elif [[ "$OPTION" == "8" ]]; then
     echo -e "${YELLOW}[*] Applying Security Hardening (Kernel & Firewall)...${RESET}"
