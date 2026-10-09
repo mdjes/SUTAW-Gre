@@ -12,7 +12,7 @@ RESET=$(tput sgr0)
 # ==========================================
 # Variables
 # ==========================================
-VERSION="V-1.7"
+VERSION="V-1.8"
 TUN_NAME="SUTAW-Gre"
 UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
 SERVICE_FILE="/etc/systemd/system/sutaw-gre.service"
@@ -53,8 +53,8 @@ echo "===================================="
 echo -e "${RESET}"
 
 echo "Select option:"
-echo "1 - IRAN (Create Tunnel + Auto Start + Secure GRE)"
-echo "2 - FOREIGN (Create Tunnel + Auto Start + Secure GRE)"
+echo "1 - IRAN (Create Tunnel + Auto Start)"
+echo "2 - FOREIGN (Create Tunnel + Auto Start)"
 echo "3 - DELETE Tunnel (Remove tunnel, rules, and service)"
 echo "4 - CHECK Status (Test tunnel connection and Ping)"
 echo "5 - ENABLE BBR (Optimize Network Speed & Latency)"
@@ -106,20 +106,18 @@ if [[ "$OPTION" == "1" ]]; then
 
     cat <<EOF > $STARTUP_SCRIPT
 #!/bin/bash
+# Remove duplicate rules if they exist to prevent rule looping on reboot
+iptables -t nat -D PREROUTING -p tcp --dport 22 -j DNAT --to-destination 132.168.30.2 2>/dev/null
+iptables -t nat -D PREROUTING -j DNAT --to-destination 132.168.30.1 2>/dev/null
+iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null
+ip link set $TUN_NAME down 2>/dev/null
+ip tunnel del $TUN_NAME 2>/dev/null
+
 sysctl -w net.ipv4.ip_forward=1
 ip tunnel add $TUN_NAME mode gre local $IP_IRAN remote $IP_FOREIGN ttl 255
-ip link set $TUN_NAME mtu 1436
 ip link set $TUN_NAME up
 ip addr add 132.168.30.2/30 dev $TUN_NAME
 
-# Flushing old NAT rules to avoid conflicts
-iptables -t nat -F
-
-# SECURITY: Only allow GRE protocol (47) from the Foreign IP
-iptables -D INPUT -p 47 ! -s $IP_FOREIGN -j DROP 2>/dev/null
-iptables -I INPUT -p 47 ! -s $IP_FOREIGN -j DROP
-
-# Port Forwarding Rules for SSH and Routing
 iptables -t nat -A PREROUTING -p tcp --dport 22 -j DNAT --to-destination 132.168.30.2
 iptables -t nat -A PREROUTING -j DNAT --to-destination 132.168.30.1
 iptables -t nat -A POSTROUTING -j MASQUERADE
@@ -128,32 +126,29 @@ EOF
     create_systemd_service
     bash $STARTUP_SCRIPT
 
-    echo -e "${GREEN}[✓] IRAN tunnel created and secured for reboots successfully.${RESET}"
+    echo -e "${GREEN}[✓] IRAN tunnel created for reboots successfully.${RESET}"
 
 elif [[ "$OPTION" == "2" ]]; then
     echo -e "${YELLOW}[*] Generating config and persistence service for FOREIGN server...${RESET}"
 
     cat <<EOF > $STARTUP_SCRIPT
 #!/bin/bash
+ip link set $TUN_NAME down 2>/dev/null
+ip tunnel del $TUN_NAME 2>/dev/null
+iptables -D INPUT --proto icmp -j DROP 2>/dev/null
+
 sysctl -w net.ipv4.ip_forward=1
 ip tunnel add $TUN_NAME mode gre local $IP_FOREIGN remote $IP_IRAN ttl 255
-ip link set $TUN_NAME mtu 1436
 ip link set $TUN_NAME up
 ip addr add 132.168.30.1/30 dev $TUN_NAME
 
-# SECURITY: Only allow GRE protocol (47) from the Iran IP
-iptables -D INPUT -p 47 ! -s $IP_IRAN -j DROP 2>/dev/null
-iptables -I INPUT -p 47 ! -s $IP_IRAN -j DROP
-
-# Drop ICMP requests on Foreign to hide server
-iptables -D INPUT --proto icmp -j DROP 2>/dev/null
 iptables -A INPUT --proto icmp -j DROP
 EOF
     chmod +x $STARTUP_SCRIPT
     create_systemd_service
     bash $STARTUP_SCRIPT
 
-    echo -e "${GREEN}[✓] FOREIGN tunnel created and secured for reboots successfully.${RESET}"
+    echo -e "${GREEN}[✓] FOREIGN tunnel created for reboots successfully.${RESET}"
 
 elif [[ "$OPTION" == "3" ]]; then
     echo -e "${RED}[*] Deleting SUTAW-Gre tunnel, rules, and boot service...${RESET}"
@@ -172,9 +167,6 @@ elif [[ "$OPTION" == "3" ]]; then
     iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null  
     iptables -D INPUT --proto icmp -j DROP 2>/dev/null  
     
-    # Remove all GRE restrictive rules safely
-    iptables -S INPUT | grep " -p 47 " | sed 's/-A /-D /g' | while read rule; do iptables $rule; done
-
     echo -e "${GREEN}[✓] Tunnel, firewall rules, and startup service completely removed.${RESET}"
 
 elif [[ "$OPTION" == "4" ]]; then
