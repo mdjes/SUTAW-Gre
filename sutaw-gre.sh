@@ -1,52 +1,23 @@
 #!/bin/bash
 
-# ==========================================
-# Colors for output
-# ==========================================
 CYAN=$(tput setaf 6)
 YELLOW=$(tput setaf 3)
 RED=$(tput setaf 1)
 GREEN=$(tput setaf 2)
 RESET=$(tput sgr0)
 
-# ==========================================
-# Variables
-# ==========================================
-VERSION="V-1.8"
 TUN_NAME="SUTAW-Gre"
+SCRIPT_NAME="sutaw-gre.sh"
 UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
+
+# مسیر فایل‌های سیستمی
 SERVICE_FILE="/etc/systemd/system/sutaw-gre.service"
 STARTUP_SCRIPT="/usr/local/bin/sutaw-gre-boot.sh"
 
-# ==========================================
-# Root Privilege Check
-# ==========================================
-if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}[!] This script must be run as root. (Use 'sudo -i' first)${RESET}"
-   exit 1
-fi
-
-# ==========================================
-# Auto Install as Global Command (mdtun)
-# ==========================================
-if [[ ! -f "/usr/local/bin/mdtun" ]]; then
-    echo -e "${YELLOW}[*] Installing mdtun command globally...${RESET}"
-    curl -fsSL "$UPDATE_URL" -o /usr/local/bin/mdtun 2>/dev/null
-    chmod +x /usr/local/bin/mdtun 2>/dev/null
-    echo -e "${GREEN}[✓] Global Command Installed! Next time just type: mdtun${RESET}"
-    sleep 2
-fi
-
-# ==========================================
-# Menu Header
-# ==========================================
-clear
 echo -e "${CYAN}"
 echo "===================================="
 echo "          GitHub: SUTAW"
 echo "   SUTAW-Gre Tunnel Setup Script"
-echo "             Version: $VERSION"
-echo "     Run anytime with: mdtun"
 echo "------------------------------------"
 echo "           T.ME/SUTAW"
 echo "===================================="
@@ -55,20 +26,18 @@ echo -e "${RESET}"
 echo "Select option:"
 echo "1 - IRAN (Create Tunnel + Auto Start)"
 echo "2 - FOREIGN (Create Tunnel + Auto Start)"
-echo "3 - DELETE Tunnel (Remove tunnel, rules, and service)"
-echo "4 - CHECK Status (Test tunnel connection and Ping)"
-echo "5 - ENABLE BBR (Optimize Network Speed & Latency)"
+echo "3 - DELETE Tunnel (Remove tunnel and rules)"
+echo "4 - CHECK Status (Check connection)"
+echo "5 - ENABLE BBR (Optimize Network Speed)"
 echo "6 - INSTALL Prerequisites (Required packages)"
 echo "7 - UPDATE Core (Update script from GitHub)"
-echo "8 - SECURE Server (Anti-DDoS, Anti-Spoof, Fail2ban)"
+echo "8 - SECURE Server (Anti-DDoS, Anti-Spoof, Fail2ban) [NEW]"
 echo "9 - EXIT"
 echo
 
 read -p "Enter a number (1-9): " OPTION
 
-# ==========================================
-# Helper Function: Create Systemd Service
-# ==========================================
+# Function to create systemd service
 create_systemd_service() {
     cat <<EOF > $SERVICE_FILE
 [Unit]
@@ -87,12 +56,9 @@ EOF
     systemctl enable sutaw-gre.service >/dev/null 2>&1
 }
 
-# ==========================================
-# Main Logic
-# ==========================================
 
 if [[ "$OPTION" == "9" ]]; then
-    echo -e "${YELLOW}[*] Exiting...${RESET}"
+    echo "[*] Exit."
     exit 0
 fi
 
@@ -102,22 +68,24 @@ if [[ "$OPTION" == "1" || "$OPTION" == "2" ]]; then
 fi
 
 if [[ "$OPTION" == "1" ]]; then
-    echo -e "${YELLOW}[*] Generating config and persistence service for IRAN server...${RESET}"
+    echo "[*] Generating config and persistence service for IRAN server..."
 
     cat <<EOF > $STARTUP_SCRIPT
 #!/bin/bash
-# Remove duplicate rules if they exist to prevent rule looping on reboot
-iptables -t nat -D PREROUTING -p tcp --dport 22 -j DNAT --to-destination 132.168.30.2 2>/dev/null
-iptables -t nat -D PREROUTING -j DNAT --to-destination 132.168.30.1 2>/dev/null
-iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null
-ip link set $TUN_NAME down 2>/dev/null
-ip tunnel del $TUN_NAME 2>/dev/null
-
 sysctl -w net.ipv4.ip_forward=1
 ip tunnel add $TUN_NAME mode gre local $IP_IRAN remote $IP_FOREIGN ttl 255
+ip link set $TUN_NAME mtu 1436
 ip link set $TUN_NAME up
 ip addr add 132.168.30.2/30 dev $TUN_NAME
 
+# Flushing old NAT rules
+iptables -t nat -F
+
+# SECURITY: Only allow GRE protocol (47) from the Foreign IP
+iptables -D INPUT -p 47 ! -s $IP_FOREIGN -j DROP 2>/dev/null
+iptables -I INPUT -p 47 ! -s $IP_FOREIGN -j DROP
+
+# Port Forwarding Rules
 iptables -t nat -A PREROUTING -p tcp --dport 22 -j DNAT --to-destination 132.168.30.2
 iptables -t nat -A PREROUTING -j DNAT --to-destination 132.168.30.1
 iptables -t nat -A POSTROUTING -j MASQUERADE
@@ -126,29 +94,32 @@ EOF
     create_systemd_service
     bash $STARTUP_SCRIPT
 
-    echo -e "${GREEN}[✓] IRAN tunnel created for reboots successfully.${RESET}"
+    echo -e "${GREEN}[✓] IRAN tunnel created and secured successfully.${RESET}"
 
 elif [[ "$OPTION" == "2" ]]; then
-    echo -e "${YELLOW}[*] Generating config and persistence service for FOREIGN server...${RESET}"
+    echo "[*] Generating config and persistence service for FOREIGN server..."
 
     cat <<EOF > $STARTUP_SCRIPT
 #!/bin/bash
-ip link set $TUN_NAME down 2>/dev/null
-ip tunnel del $TUN_NAME 2>/dev/null
-iptables -D INPUT --proto icmp -j DROP 2>/dev/null
-
 sysctl -w net.ipv4.ip_forward=1
 ip tunnel add $TUN_NAME mode gre local $IP_FOREIGN remote $IP_IRAN ttl 255
+ip link set $TUN_NAME mtu 1436
 ip link set $TUN_NAME up
 ip addr add 132.168.30.1/30 dev $TUN_NAME
 
+# SECURITY: Only allow GRE protocol (47) from the Iran IP
+iptables -D INPUT -p 47 ! -s $IP_IRAN -j DROP 2>/dev/null
+iptables -I INPUT -p 47 ! -s $IP_IRAN -j DROP
+
+# Drop ICMP
+iptables -D INPUT --proto icmp -j DROP 2>/dev/null
 iptables -A INPUT --proto icmp -j DROP
 EOF
     chmod +x $STARTUP_SCRIPT
     create_systemd_service
     bash $STARTUP_SCRIPT
 
-    echo -e "${GREEN}[✓] FOREIGN tunnel created for reboots successfully.${RESET}"
+    echo -e "${GREEN}[✓] FOREIGN tunnel created and secured successfully.${RESET}"
 
 elif [[ "$OPTION" == "3" ]]; then
     echo -e "${RED}[*] Deleting SUTAW-Gre tunnel, rules, and boot service...${RESET}"
@@ -159,15 +130,18 @@ elif [[ "$OPTION" == "3" ]]; then
     rm -f $STARTUP_SCRIPT
     systemctl daemon-reload
 
-    ip link set $TUN_NAME down 2>/dev/null  
-    ip tunnel del $TUN_NAME 2>/dev/null  
+    sudo ip link set $TUN_NAME down 2>/dev/null  
+    sudo ip tunnel del $TUN_NAME 2>/dev/null  
 
     iptables -t nat -D PREROUTING -p tcp --dport 22 -j DNAT --to-destination 132.168.30.2 2>/dev/null  
     iptables -t nat -D PREROUTING -j DNAT --to-destination 132.168.30.1 2>/dev/null  
     iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null  
     iptables -D INPUT --proto icmp -j DROP 2>/dev/null  
     
-    echo -e "${GREEN}[✓] Tunnel, firewall rules, and startup service completely removed.${RESET}"
+    # Remove all GRE restrictive rules safely
+    iptables -S INPUT | grep " -p 47 " | sed 's/-A /-D /g' | while read rule; do iptables $rule; done
+
+    echo -e "${GREEN}[✓] Tunnel, firewall rules, and startup service removed.${RESET}"
 
 elif [[ "$OPTION" == "4" ]]; then
     echo -e "${YELLOW}[*] Checking tunnel status...${RESET}"
@@ -189,36 +163,29 @@ elif [[ "$OPTION" == "5" ]]; then
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p > /dev/null
-    echo -e "${GREEN}[✓] BBR is successfully enabled! Speed optimized.${RESET}"
+    echo -e "${GREEN}[✓] BBR is successfully enabled!${RESET}"
 
 elif [[ "$OPTION" == "6" ]]; then
     echo -e "${YELLOW}[*] Installing Prerequisites...${RESET}"
     apt-get update -y
     apt-get install -y iproute2 iptables curl ufw grep fail2ban
-    echo -e "${GREEN}[✓] All required packages installed.${RESET}"
+    echo -e "${GREEN}[✓] Required packages installed.${RESET}"
 
 elif [[ "$OPTION" == "7" ]]; then
     echo -e "${YELLOW}[*] Updating SUTAW-Gre core from GitHub...${RESET}"
-    
-    TMP_FILE=$(mktemp)
-    if curl -fsSL "$UPDATE_URL" -o "$TMP_FILE"; then
-        cat "$TMP_FILE" > /usr/local/bin/mdtun
-        chmod +x /usr/local/bin/mdtun
-        rm -f "$TMP_FILE"
-        
-        echo -e "${GREEN}[✓] Update completed successfully.${RESET}"
-        echo -e "${GREEN}[*] Please re-run using command: ${YELLOW}mdtun${RESET}"  
-        exit 0
-    else
-        echo -e "${RED}[!] Update failed. Network issue or GitHub URL is invalid.${RESET}"
-        rm -f "$TMP_FILE"
-        exit 1
-    fi
+    curl -fsSL "$UPDATE_URL" -o "/tmp/$SCRIPT_NAME" || {  
+        echo -e "${RED}[!] Update failed. Network or GitHub issue.${RESET}"  
+        exit 1  
+    }  
+    mv "/tmp/$SCRIPT_NAME" "./$SCRIPT_NAME"  
+    chmod +x "./$SCRIPT_NAME"  
+    echo -e "${GREEN}[✓] Update completed successfully. Please re-run the script.${RESET}"  
+    exit 0
 
 elif [[ "$OPTION" == "8" ]]; then
     echo -e "${YELLOW}[*] Applying Security Hardening (Kernel & Firewall)...${RESET}"
     
-    # 1. Kernel Level Security tweaks
+    # 1. Kernel Level Security
     sed -i '/net.ipv4.tcp_syncookies/d' /etc/sysctl.conf
     sed -i '/net.ipv4.conf.all.rp_filter/d' /etc/sysctl.conf
     sed -i '/net.ipv4.conf.all.accept_redirects/d' /etc/sysctl.conf
@@ -230,18 +197,18 @@ elif [[ "$OPTION" == "8" ]]; then
     echo "net.ipv4.conf.all.send_redirects = 0" >> /etc/sysctl.conf
     sysctl -p > /dev/null
     
-    # 2. Drop Invalid Packets via iptables (Prevents certain scans/attacks)
+    # 2. Drop Invalid Packets via iptables
     iptables -C INPUT -m conntrack --ctstate INVALID -j DROP 2>/dev/null || iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
     
-    # 3. Fail2ban setup for SSH protection
+    # 3. Install and start Fail2ban for SSH protection
     apt-get update -y >/dev/null 2>&1
     apt-get install -y fail2ban >/dev/null 2>&1
     systemctl enable fail2ban >/dev/null 2>&1
-    systemctl restart fail2ban >/dev/null 2>&1
+    systemctl start fail2ban >/dev/null 2>&1
 
     echo -e "${GREEN}[✓] Anti-DDoS, IP Spoofing protection, and Fail2ban applied successfully!${RESET}"
 
 else
-    echo -e "${RED}[!] Invalid selection. Run the script again and select a number from 1 to 9.${RESET}"
+    echo -e "${RED}[!] Invalid selection. Run the script again.${RESET}"
     exit 1
 fi
