@@ -1,24 +1,30 @@
 
 #!/usr/bin/env bash
 # ==========================================================
-# SUTAW-Gre v2.0.2
+# SUTAW-Gre v2.0.3
 # Professional GRE Tunnel Manager
+# TCP / UDP Forwarding
+# Systemd | Policy Routing | Dedicated Firewall
 # ==========================================================
 
 set -Eeuo pipefail
 
-VERSION="2.0.2"
+VERSION="2.0.3"
+UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
+
+NAME="SUTAW-Gre"
 TUN="SUTAW-Gre"
 
 INSTALL_PATH="/usr/local/sbin/sutaw-gre.sh"
 CONFIG="/etc/sutaw-gre.conf"
 SERVICE="/etc/systemd/system/sutaw-gre.service"
+SYSCTL_FILE="/etc/sysctl.d/99-sutaw-gre.conf"
 STATE_DIR="/var/lib/sutaw-gre"
 
 IRAN_TUN_IP="10.200.200.1"
 FOREIGN_TUN_IP="10.200.200.2"
 
-TABLE="200"
+TABLE="52000"
 PRIORITY="10500"
 MARK="0x535554"
 
@@ -46,7 +52,7 @@ require_root() {
 dependencies() {
     local missing=()
 
-    for cmd in ip iptables sysctl python3 systemctl ping; do
+    for cmd in ip iptables sysctl python3 systemctl ping curl; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
 
@@ -60,8 +66,8 @@ import ipaddress
 import sys
 
 try:
-    a = ipaddress.ip_address(sys.argv[1])
-    sys.exit(0 if a.version == 4 and not a.is_unspecified else 1)
+    address = ipaddress.ip_address(sys.argv[1])
+    sys.exit(0 if address.version == 4 and not address.is_unspecified else 1)
 except ValueError:
     sys.exit(1)
 PY
@@ -79,7 +85,7 @@ load_config() {
     valid_ip "${FOREIGN_IP:-}" || die "Invalid Foreign IP."
 
     [[ "$IRAN_IP" != "$FOREIGN_IP" ]] ||
-        die "Identical public IPs."
+        die "Public IPs cannot be identical."
 
     [[ "${SSH_PORT:-}" =~ ^[0-9]+$ ]] &&
         ((SSH_PORT >= 1 && SSH_PORT <= 65535)) ||
@@ -149,7 +155,8 @@ detect_interface() {
     WAN_IF=$(ip -4 route get "$peer" |
         awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 
-    [[ -n "${WAN_IF:-}" ]] || die "Cannot detect WAN interface."
+    [[ -n "${WAN_IF:-}" ]] ||
+        die "Cannot detect WAN interface."
 
     log "WAN interface: $WAN_IF"
 }
@@ -163,7 +170,7 @@ check_local_ip() {
 }
 
 configure_tunnel() {
-    log "Configuring GRE..."
+    log "Configuring GRE interface..."
 
     ip tunnel del "$TUN" 2>/dev/null || true
 
@@ -173,37 +180,67 @@ configure_tunnel() {
         ttl 255
 
     ip link set "$TUN" mtu 1476
+
     ip addr add "$LOCAL_TUN_IP/30" dev "$TUN"
+
     ip link set "$TUN" up
 
     ok "GRE interface created."
+}
+
+save_state() {
+    mkdir -p "$STATE_DIR"
+
+    if [[ ! -f "$STATE_DIR/original_ip_forward" ]]; then
+        sysctl -n net.ipv4.ip_forward \
+            > "$STATE_DIR/original_ip_forward"
+    fi
+}
+
+enable_forwarding() {
+    save_state
+
+    cat > "$SYSCTL_FILE" <<EOF
+net.ipv4.ip_forward = 1
+EOF
+
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+    ok "IPv4 forwarding enabled."
 }
 
 configure_input() {
     ensure_chain filter "$C_INPUT"
     ensure_jump filter INPUT "$C_INPUT"
 
-    # Permit GRE from the configured peer.
+    # Permit GRE from configured peer.
     ipt -A "$C_INPUT" \
         -p 47 -s "$PEER_IP" -j ACCEPT
 
-    # Permit GRE endpoint monitoring.
+    # Permit tunnel endpoint monitoring.
     ipt -A "$C_INPUT" \
-        -i "$TUN" -s "$PEER_TUN_IP" \
+        -i "$TUN" \
+        -s "$PEER_TUN_IP" \
         -d "$LOCAL_TUN_IP" \
-        -p icmp --icmp-type echo-request \
+        -p icmp \
+        --icmp-type echo-request \
         -j ACCEPT
 
     if [[ "$ROLE" == "foreign" ]]; then
-        # Forwarded TCP services.
-        ipt -A "$C_INPUT" \
-            -i "$TUN" -s "$IRAN_TUN_IP" \
-            -d "$FOREIGN_IP" -p tcp -j ACCEPT
 
-        # Forwarded UDP services.
+        # Allow forwarded TCP traffic.
         ipt -A "$C_INPUT" \
-            -i "$TUN" -s "$IRAN_TUN_IP" \
-            -d "$FOREIGN_IP" -p udp -j ACCEPT
+            -i "$TUN" \
+            -s "$IRAN_TUN_IP" \
+            -d "$FOREIGN_IP" \
+            -p tcp -j ACCEPT
+
+        # Allow forwarded UDP traffic.
+        ipt -A "$C_INPUT" \
+            -i "$TUN" \
+            -s "$IRAN_TUN_IP" \
+            -d "$FOREIGN_IP" \
+            -p udp -j ACCEPT
     fi
 }
 
@@ -220,83 +257,92 @@ configure_iran_forwarding() {
     ensure_chain nat "$C_NAT_POST"
     ensure_jump nat POSTROUTING "$C_NAT_POST"
 
-    # Mark TCP except Iranian SSH.
+    # Mark incoming TCP except SSH.
     ipt -t mangle -A "$C_MANGLE" \
-        -i "$WAN_IF" -d "$IRAN_IP" \
-        -p tcp ! --dport "$SSH_PORT" \
+        -i "$WAN_IF" \
+        -d "$IRAN_IP" \
+        -p tcp \
+        ! --dport "$SSH_PORT" \
         -j MARK --set-xmark "$MARK/0xffffffff"
 
-    # Mark UDP.
+    # Mark incoming UDP.
     ipt -t mangle -A "$C_MANGLE" \
-        -i "$WAN_IF" -d "$IRAN_IP" \
+        -i "$WAN_IF" \
+        -d "$IRAN_IP" \
         -p udp \
         -j MARK --set-xmark "$MARK/0xffffffff"
 
     # DNAT TCP.
     ipt -t nat -A "$C_NAT_PRE" \
-        -i "$WAN_IF" -d "$IRAN_IP" \
-        -p tcp ! --dport "$SSH_PORT" \
+        -i "$WAN_IF" \
+        -d "$IRAN_IP" \
+        -p tcp \
+        ! --dport "$SSH_PORT" \
         -j DNAT --to-destination "$FOREIGN_IP"
 
     # DNAT UDP.
     ipt -t nat -A "$C_NAT_PRE" \
-        -i "$WAN_IF" -d "$IRAN_IP" \
+        -i "$WAN_IF" \
+        -d "$IRAN_IP" \
         -p udp \
         -j DNAT --to-destination "$FOREIGN_IP"
 
-    # SNAT requests to the Iran tunnel IP.
+    # SNAT through GRE.
     ipt -t nat -A "$C_NAT_POST" \
-        -o "$TUN" -d "$FOREIGN_IP" \
+        -o "$TUN" \
+        -d "$FOREIGN_IP" \
         -j SNAT --to-source "$IRAN_TUN_IP"
 
-    # Permit outgoing forwarded traffic.
+    # Permit outgoing TCP.
     ipt -A "$C_FORWARD" \
-        -i "$WAN_IF" -o "$TUN" \
-        -d "$FOREIGN_IP" -p tcp -j ACCEPT
+        -i "$WAN_IF" \
+        -o "$TUN" \
+        -d "$FOREIGN_IP" \
+        -p tcp -j ACCEPT
 
+    # Permit outgoing UDP.
     ipt -A "$C_FORWARD" \
-        -i "$WAN_IF" -o "$TUN" \
-        -d "$FOREIGN_IP" -p udp -j ACCEPT
+        -i "$WAN_IF" \
+        -o "$TUN" \
+        -d "$FOREIGN_IP" \
+        -p udp -j ACCEPT
 
-    # Permit established responses.
+    # Permit established return traffic.
     ipt -A "$C_FORWARD" \
-        -i "$TUN" -o "$WAN_IF" \
+        -i "$TUN" \
+        -o "$WAN_IF" \
         -s "$IRAN_IP" \
-        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -m conntrack \
+        --ctstate ESTABLISHED,RELATED \
         -j ACCEPT
 
-    # Prevent conflicting policy rule.
+    # Ensure routing priority is free.
     if ip rule show | grep -q "^${PRIORITY}:"; then
         die "Routing priority $PRIORITY is occupied."
     fi
 
-    ip route replace default dev "$TUN" table "$TABLE"
+    # Do not overwrite another routing table.
+    if ip route show table "$TABLE" | grep -q .; then
+        die "Routing table $TABLE is already in use."
+    fi
+
+    ip route add default dev "$TUN" table "$TABLE"
 
     ip rule add priority "$PRIORITY" \
-        fwmark "$MARK/0xffffffff" table "$TABLE"
-
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+        fwmark "$MARK/0xffffffff" \
+        table "$TABLE"
 
     ok "Iran forwarding configured."
 }
 
 configure_foreign() {
-    log "Foreign endpoint requires no NAT."
+    log "Configuring foreign endpoint..."
 
-    # Return packets automatically use conntrack.
-    # Replies to the Iran tunnel source use the connected
-    # GRE network route.
+    # No NAT required on the foreign server.
+    # Return traffic reaches Iran through the connected
+    # GRE subnet route.
 
     ok "Foreign endpoint configured."
-}
-
-save_state() {
-    mkdir -p "$STATE_DIR"
-
-    if [[ ! -f "$STATE_DIR/original_ip_forward" ]]; then
-        sysctl -n net.ipv4.ip_forward \
-            > "$STATE_DIR/original_ip_forward"
-    fi
 }
 
 cleanup_runtime() {
@@ -306,7 +352,6 @@ cleanup_runtime() {
     remove_chain nat "$C_NAT_PRE"
     remove_chain nat "$C_NAT_POST"
 
-    # Delete only the SUTAW policy rule.
     while ip rule del priority "$PRIORITY" \
         fwmark "$MARK/0xffffffff" \
         table "$TABLE" 2>/dev/null; do
@@ -320,6 +365,17 @@ cleanup_runtime() {
 
     ip link set "$TUN" down 2>/dev/null || true
     ip tunnel del "$TUN" 2>/dev/null || true
+}
+
+rollback_on_error() {
+    local rc=$?
+    trap - ERR
+
+    warn "Configuration failed. Rolling back SUTAW resources."
+
+    cleanup_runtime || true
+
+    exit "$rc"
 }
 
 apply() {
@@ -342,15 +398,16 @@ apply() {
     detect_interface "$PEER_IP"
     check_local_ip
 
-    log "Applying SUTAW-Gre on $ROLE..."
+    trap rollback_on_error ERR
 
-    # Only clean SUTAW-owned resources.
+    log "Applying SUTAW-Gre v$VERSION..."
+
     cleanup_runtime
 
-    save_state
     configure_tunnel
 
     if [[ "$ROLE" == "iran" ]]; then
+        enable_forwarding
         configure_iran_forwarding
     else
         configure_foreign
@@ -358,14 +415,16 @@ apply() {
 
     configure_input
 
-    ok "Tunnel configuration applied."
+    trap - ERR
+
+    ok "SUTAW-Gre successfully configured."
 }
 
 stop_runtime() {
     require_root
     dependencies
 
-    log "Stopping SUTAW-Gre..."
+    log "Stopping tunnel..."
 
     cleanup_runtime
 
@@ -373,28 +432,53 @@ stop_runtime() {
 }
 
 install_service() {
-    local source_path
-
-    # Correctly resolve the actual script path.
-    source_path=$(readlink -f "${BASH_SOURCE[0]}")
-
-    [[ -f "$source_path" ]] ||
-        die "Cannot locate script file. Download it to disk first."
+    local source_path=""
+    local temp_file=""
 
     mkdir -p "$(dirname "$INSTALL_PATH")"
 
-    if [[ "$source_path" != "$INSTALL_PATH" ]]; then
-        install -m 0755 "$source_path" "$INSTALL_PATH"
+    # First try the real local script.
+    source_path="${BASH_SOURCE[0]:-}"
+
+    if [[ -n "$source_path" && -f "$source_path" ]]; then
+        source_path=$(readlink -f "$source_path")
+
+        if [[ "$source_path" != "$INSTALL_PATH" ]]; then
+            install -m 0755 "$source_path" "$INSTALL_PATH"
+        else
+            chmod 0755 "$INSTALL_PATH"
+        fi
     else
-        chmod 0755 "$INSTALL_PATH"
+        # Pipe/stdin execution:
+        # Download the canonical GitHub copy instead.
+        log "Script source is not a regular file."
+        log "Downloading installation copy from GitHub..."
+
+        temp_file=$(mktemp /tmp/sutaw-gre.XXXXXX)
+
+        if ! curl -fsSL "$UPDATE_URL" -o "$temp_file"; then
+            rm -f "$temp_file"
+            die "Cannot download script from GitHub."
+        fi
+
+        if ! bash -n "$temp_file"; then
+            rm -f "$temp_file"
+            die "Downloaded script failed syntax validation."
+        fi
+
+        install -m 0755 "$temp_file" "$INSTALL_PATH"
+        rm -f "$temp_file"
     fi
+
+    # Validate installed copy.
+    bash -n "$INSTALL_PATH" ||
+        die "Installed script failed syntax validation."
 
     cat > "$SERVICE" <<EOF
 [Unit]
 Description=SUTAW-Gre Professional GRE Tunnel
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -432,8 +516,8 @@ setup() {
 
     ssh="${ssh:-22}"
 
-    valid_ip "$iran" || die "Invalid Iran IP."
-    valid_ip "$foreign" || die "Invalid Foreign IP."
+    valid_ip "$iran" || die "Invalid Iran IPv4."
+    valid_ip "$foreign" || die "Invalid Foreign IPv4."
 
     [[ "$iran" != "$foreign" ]] ||
         die "Public IPs cannot be identical."
@@ -455,10 +539,9 @@ EOF
 
     install_service
 
-    # Start the service once.
     systemctl restart sutaw-gre.service
 
-    ok "Installation completed: $role"
+    ok "Installation completed on $role server."
 }
 
 remove_all() {
@@ -474,10 +557,14 @@ remove_all() {
     if [[ -f "$STATE_DIR/original_ip_forward" ]]; then
         local old
         old=$(cat "$STATE_DIR/original_ip_forward")
+
         sysctl -w "net.ipv4.ip_forward=$old" >/dev/null || true
     fi
 
-    rm -f "$CONFIG" "$SERVICE"
+    rm -f "$CONFIG"
+    rm -f "$SERVICE"
+    rm -f "$SYSCTL_FILE"
+
     rm -rf "$STATE_DIR"
 
     systemctl daemon-reload
@@ -491,7 +578,7 @@ status() {
 
     echo
     echo "======================================"
-    echo "         SUTAW-Gre STATUS"
+    echo "          SUTAW-Gre STATUS"
     echo "======================================"
 
     if ! ip link show "$TUN" >/dev/null 2>&1; then
@@ -512,22 +599,27 @@ status() {
             fi
 
             if ping -I "$TUN" -c 3 -W 2 "$target" >/dev/null 2>&1; then
-                ok "Remote endpoint reachable."
+                ok "Remote GRE endpoint reachable."
             else
-                warn "Remote endpoint not responding."
+                warn "Remote GRE endpoint not responding."
             fi
         fi
     fi
 
     echo
-    systemctl status sutaw-gre.service --no-pager -l 2>/dev/null || true
+    echo "---- Systemd ----"
+
+    systemctl status sutaw-gre.service \
+        --no-pager -l 2>/dev/null || true
 
     echo
     echo "---- GRE Statistics ----"
+
     ip -s link show "$TUN" 2>/dev/null || true
 
     echo
-    echo "---- Policy Routing ----"
+    echo "---- Routing Rules ----"
+
     ip rule show | grep "$PRIORITY" || true
     ip route show table "$TABLE" || true
 
@@ -574,6 +666,7 @@ menu() {
     echo "6 - STOP TUNNEL"
     echo "7 - INSTALL PREREQUISITES"
     echo "8 - EXIT"
+
     echo
 
     read -rp "Select option (1-8): " option
