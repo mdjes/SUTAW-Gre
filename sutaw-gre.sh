@@ -1,15 +1,25 @@
 
 #!/usr/bin/env bash
 # ==========================================================
-# SUTAW-Gre v2.0.3
+# SUTAW-Gre v2.1.0
 # Professional GRE Tunnel Manager
-# TCP / UDP Forwarding
-# Systemd | Policy Routing | Dedicated Firewall
+#
+# Features:
+# - Iran / Foreign GRE setup
+# - TCP / UDP forwarding
+# - SSH preservation
+# - Dedicated iptables chains
+# - Policy routing
+# - Systemd auto startup
+# - Safe removal
+# - GitHub self updater
+# - Cache-busting updates
 # ==========================================================
 
 set -Eeuo pipefail
 
-VERSION="2.0.3"
+VERSION="2.1.0"
+
 UPDATE_URL="https://raw.githubusercontent.com/mdjes/SUTAW-Gre/main/sutaw-gre.sh"
 
 NAME="SUTAW-Gre"
@@ -18,7 +28,6 @@ TUN="SUTAW-Gre"
 INSTALL_PATH="/usr/local/sbin/sutaw-gre.sh"
 CONFIG="/etc/sutaw-gre.conf"
 SERVICE="/etc/systemd/system/sutaw-gre.service"
-SYSCTL_FILE="/etc/sysctl.d/99-sutaw-gre.conf"
 STATE_DIR="/var/lib/sutaw-gre"
 
 IRAN_TUN_IP="10.200.200.1"
@@ -52,12 +61,17 @@ require_root() {
 dependencies() {
     local missing=()
 
-    for cmd in ip iptables sysctl python3 systemctl ping curl; do
+    for cmd in ip iptables sysctl python3 systemctl ping; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
 
     ((${#missing[@]} == 0)) ||
         die "Missing dependencies: ${missing[*]}. Select option 7."
+}
+
+require_curl() {
+    command -v curl >/dev/null 2>&1 ||
+        die "curl is missing. Select option 7."
 }
 
 valid_ip() {
@@ -81,8 +95,8 @@ load_config() {
     [[ "${ROLE:-}" == "iran" || "${ROLE:-}" == "foreign" ]] ||
         die "Invalid role."
 
-    valid_ip "${IRAN_IP:-}" || die "Invalid Iran IP."
-    valid_ip "${FOREIGN_IP:-}" || die "Invalid Foreign IP."
+    valid_ip "${IRAN_IP:-}" || die "Invalid Iran IPv4."
+    valid_ip "${FOREIGN_IP:-}" || die "Invalid Foreign IPv4."
 
     [[ "$IRAN_IP" != "$FOREIGN_IP" ]] ||
         die "Public IPs cannot be identical."
@@ -91,6 +105,90 @@ load_config() {
         ((SSH_PORT >= 1 && SSH_PORT <= 65535)) ||
         die "Invalid SSH port."
 }
+
+# ==========================================================
+# GITHUB UPDATE ENGINE
+# ==========================================================
+
+download_latest() {
+    require_root
+    require_curl
+
+    local temp_file
+    local new_file
+    local url
+
+    mkdir -p "$(dirname "$INSTALL_PATH")"
+
+    temp_file=$(mktemp /tmp/sutaw-update.XXXXXX)
+    new_file="${INSTALL_PATH}.new.$$"
+
+    # Cache busting prevents stale CDN responses.
+    url="${UPDATE_URL}?cache=$(date +%s%N)"
+
+    log "Downloading latest SUTAW-Gre from GitHub..."
+
+    if ! curl \
+        --fail \
+        --location \
+        --silent \
+        --show-error \
+        --retry 2 \
+        --connect-timeout 15 \
+        --max-time 120 \
+        "$url" \
+        -o "$temp_file"; then
+
+        rm -f "$temp_file" "$new_file"
+        die "GitHub download failed."
+    fi
+
+    # Validate downloaded file.
+    if ! grep -q 'SUTAW-Gre' "$temp_file"; then
+        rm -f "$temp_file" "$new_file"
+        die "Invalid downloaded file."
+    fi
+
+    if ! grep -Eq '^VERSION="[0-9]+\.[0-9]+\.[0-9]+"' "$temp_file"; then
+        rm -f "$temp_file" "$new_file"
+        die "Version information missing."
+    fi
+
+    if ! bash -n "$temp_file"; then
+        rm -f "$temp_file" "$new_file"
+        die "Downloaded script has syntax errors."
+    fi
+
+    # Extract downloaded version.
+    local new_version
+
+    new_version=$(grep -m1 '^VERSION=' "$temp_file" |
+        cut -d'"' -f2)
+
+    # Install to a temporary file on the same filesystem.
+    install -m 0755 "$temp_file" "$new_file"
+
+    # Atomic replacement.
+    mv -f "$new_file" "$INSTALL_PATH"
+
+    rm -f "$temp_file"
+
+    ok "SUTAW-Gre updated successfully."
+    ok "Installed version: $new_version"
+}
+
+update_core() {
+    download_latest
+
+    echo
+    ok "Restarting with the latest version..."
+
+    exec "$INSTALL_PATH"
+}
+
+# ==========================================================
+# IPTABLES MANAGEMENT
+# ==========================================================
 
 ipt() {
     iptables -w 10 "$@"
@@ -149,6 +247,10 @@ remove_chain() {
     ipt -t "$table" -X "$chain" 2>/dev/null || true
 }
 
+# ==========================================================
+# NETWORK MANAGEMENT
+# ==========================================================
+
 detect_interface() {
     local peer="$1"
 
@@ -170,7 +272,7 @@ check_local_ip() {
 }
 
 configure_tunnel() {
-    log "Configuring GRE interface..."
+    log "Creating GRE interface..."
 
     ip tunnel del "$TUN" 2>/dev/null || true
 
@@ -185,7 +287,7 @@ configure_tunnel() {
 
     ip link set "$TUN" up
 
-    ok "GRE interface created."
+    ok "GRE interface configured."
 }
 
 save_state() {
@@ -200,47 +302,50 @@ save_state() {
 enable_forwarding() {
     save_state
 
-    cat > "$SYSCTL_FILE" <<EOF
-net.ipv4.ip_forward = 1
-EOF
-
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
     ok "IPv4 forwarding enabled."
 }
 
+# ==========================================================
+# FIREWALL CONFIGURATION
+# ==========================================================
+
 configure_input() {
     ensure_chain filter "$C_INPUT"
     ensure_jump filter INPUT "$C_INPUT"
 
-    # Permit GRE from configured peer.
+    # Permit GRE only from the configured peer.
     ipt -A "$C_INPUT" \
-        -p 47 -s "$PEER_IP" -j ACCEPT
+        -p 47 \
+        -s "$PEER_IP" \
+        -j ACCEPT
 
-    # Permit tunnel endpoint monitoring.
+    # Permit ICMP between tunnel endpoints.
     ipt -A "$C_INPUT" \
         -i "$TUN" \
         -s "$PEER_TUN_IP" \
         -d "$LOCAL_TUN_IP" \
         -p icmp \
-        --icmp-type echo-request \
         -j ACCEPT
 
     if [[ "$ROLE" == "foreign" ]]; then
 
-        # Allow forwarded TCP traffic.
+        # Allow TCP services forwarded from Iran.
         ipt -A "$C_INPUT" \
             -i "$TUN" \
             -s "$IRAN_TUN_IP" \
             -d "$FOREIGN_IP" \
-            -p tcp -j ACCEPT
+            -p tcp \
+            -j ACCEPT
 
-        # Allow forwarded UDP traffic.
+        # Allow UDP services forwarded from Iran.
         ipt -A "$C_INPUT" \
             -i "$TUN" \
             -s "$IRAN_TUN_IP" \
             -d "$FOREIGN_IP" \
-            -p udp -j ACCEPT
+            -p udp \
+            -j ACCEPT
     fi
 }
 
@@ -293,19 +398,21 @@ configure_iran_forwarding() {
         -d "$FOREIGN_IP" \
         -j SNAT --to-source "$IRAN_TUN_IP"
 
-    # Permit outgoing TCP.
+    # Permit outgoing TCP forwarding.
     ipt -A "$C_FORWARD" \
         -i "$WAN_IF" \
         -o "$TUN" \
         -d "$FOREIGN_IP" \
-        -p tcp -j ACCEPT
+        -p tcp \
+        -j ACCEPT
 
-    # Permit outgoing UDP.
+    # Permit outgoing UDP forwarding.
     ipt -A "$C_FORWARD" \
         -i "$WAN_IF" \
         -o "$TUN" \
         -d "$FOREIGN_IP" \
-        -p udp -j ACCEPT
+        -p udp \
+        -j ACCEPT
 
     # Permit established return traffic.
     ipt -A "$C_FORWARD" \
@@ -321,7 +428,7 @@ configure_iran_forwarding() {
         die "Routing priority $PRIORITY is occupied."
     fi
 
-    # Do not overwrite another routing table.
+    # Do not overwrite an existing routing table.
     if ip route show table "$TABLE" | grep -q .; then
         die "Routing table $TABLE is already in use."
     fi
@@ -332,18 +439,23 @@ configure_iran_forwarding() {
         fwmark "$MARK/0xffffffff" \
         table "$TABLE"
 
+    enable_forwarding
+
     ok "Iran forwarding configured."
 }
 
 configure_foreign() {
     log "Configuring foreign endpoint..."
 
-    # No NAT required on the foreign server.
-    # Return traffic reaches Iran through the connected
-    # GRE subnet route.
+    # The foreign endpoint receives forwarded TCP/UDP
+    # as local INPUT traffic. No DNAT is needed here.
 
     ok "Foreign endpoint configured."
 }
+
+# ==========================================================
+# CLEANUP
+# ==========================================================
 
 cleanup_runtime() {
     remove_chain filter "$C_INPUT"
@@ -366,6 +478,10 @@ cleanup_runtime() {
     ip link set "$TUN" down 2>/dev/null || true
     ip tunnel del "$TUN" 2>/dev/null || true
 }
+
+# ==========================================================
+# APPLY CONFIGURATION
+# ==========================================================
 
 rollback_on_error() {
     local rc=$?
@@ -400,14 +516,13 @@ apply() {
 
     trap rollback_on_error ERR
 
-    log "Applying SUTAW-Gre v$VERSION..."
+    log "Applying SUTAW-Gre v$VERSION on $ROLE..."
 
     cleanup_runtime
 
     configure_tunnel
 
     if [[ "$ROLE" == "iran" ]]; then
-        enable_forwarding
         configure_iran_forwarding
     else
         configure_foreign
@@ -424,55 +539,22 @@ stop_runtime() {
     require_root
     dependencies
 
-    log "Stopping tunnel..."
+    log "Stopping SUTAW-Gre..."
 
     cleanup_runtime
 
     ok "Tunnel stopped."
 }
 
+# ==========================================================
+# SYSTEMD
+# ==========================================================
+
 install_service() {
-    local source_path=""
-    local temp_file=""
+    log "Installing latest core..."
 
-    mkdir -p "$(dirname "$INSTALL_PATH")"
-
-    # First try the real local script.
-    source_path="${BASH_SOURCE[0]:-}"
-
-    if [[ -n "$source_path" && -f "$source_path" ]]; then
-        source_path=$(readlink -f "$source_path")
-
-        if [[ "$source_path" != "$INSTALL_PATH" ]]; then
-            install -m 0755 "$source_path" "$INSTALL_PATH"
-        else
-            chmod 0755 "$INSTALL_PATH"
-        fi
-    else
-        # Pipe/stdin execution:
-        # Download the canonical GitHub copy instead.
-        log "Script source is not a regular file."
-        log "Downloading installation copy from GitHub..."
-
-        temp_file=$(mktemp /tmp/sutaw-gre.XXXXXX)
-
-        if ! curl -fsSL "$UPDATE_URL" -o "$temp_file"; then
-            rm -f "$temp_file"
-            die "Cannot download script from GitHub."
-        fi
-
-        if ! bash -n "$temp_file"; then
-            rm -f "$temp_file"
-            die "Downloaded script failed syntax validation."
-        fi
-
-        install -m 0755 "$temp_file" "$INSTALL_PATH"
-        rm -f "$temp_file"
-    fi
-
-    # Validate installed copy.
-    bash -n "$INSTALL_PATH" ||
-        die "Installed script failed syntax validation."
+    # Never depend on /dev/fd or BASH_SOURCE.
+    download_latest
 
     cat > "$SERVICE" <<EOF
 [Unit]
@@ -498,9 +580,14 @@ EOF
     ok "Systemd service installed."
 }
 
+# ==========================================================
+# INSTALLATION
+# ==========================================================
+
 setup() {
     require_root
     dependencies
+    require_curl
 
     local role="$1"
     local iran foreign ssh
@@ -542,7 +629,12 @@ EOF
     systemctl restart sutaw-gre.service
 
     ok "Installation completed on $role server."
+    ok "Automatic startup enabled."
 }
+
+# ==========================================================
+# REMOVE
+# ==========================================================
 
 remove_all() {
     require_root
@@ -556,6 +648,7 @@ remove_all() {
 
     if [[ -f "$STATE_DIR/original_ip_forward" ]]; then
         local old
+
         old=$(cat "$STATE_DIR/original_ip_forward")
 
         sysctl -w "net.ipv4.ip_forward=$old" >/dev/null || true
@@ -563,15 +656,18 @@ remove_all() {
 
     rm -f "$CONFIG"
     rm -f "$SERVICE"
-    rm -f "$SYSCTL_FILE"
-
     rm -rf "$STATE_DIR"
 
     systemctl daemon-reload
+
     systemctl reset-failed sutaw-gre.service 2>/dev/null || true
 
     ok "SUTAW-Gre removed."
 }
+
+# ==========================================================
+# STATUS
+# ==========================================================
 
 status() {
     require_root
@@ -618,7 +714,7 @@ status() {
     ip -s link show "$TUN" 2>/dev/null || true
 
     echo
-    echo "---- Routing Rules ----"
+    echo "---- Routing ----"
 
     ip rule show | grep "$PRIORITY" || true
     ip route show table "$TABLE" || true
@@ -626,6 +722,10 @@ status() {
     echo
     echo "======================================"
 }
+
+# ==========================================================
+# PREREQUISITES
+# ==========================================================
 
 install_prerequisites() {
     require_root
@@ -648,6 +748,10 @@ install_prerequisites() {
     ok "Prerequisites installed."
 }
 
+# ==========================================================
+# MENU
+# ==========================================================
+
 menu() {
     echo
     echo -e "${CYAN}"
@@ -665,17 +769,26 @@ menu() {
     echo "5 - START TUNNEL"
     echo "6 - STOP TUNNEL"
     echo "7 - INSTALL PREREQUISITES"
-    echo "8 - EXIT"
+    echo "8 - UPDATE FROM GITHUB"
+    echo "9 - EXIT"
 
     echo
 
-    read -rp "Select option (1-8): " option
+    read -rp "Select option (1-9): " option
 
     case "$option" in
-        1) setup iran ;;
-        2) setup foreign ;;
-        3) remove_all ;;
-        4) status ;;
+        1)
+            setup iran
+            ;;
+        2)
+            setup foreign
+            ;;
+        3)
+            remove_all
+            ;;
+        4)
+            status
+            ;;
         5)
             require_root
             systemctl start sutaw-gre.service
@@ -684,11 +797,24 @@ menu() {
             require_root
             systemctl stop sutaw-gre.service
             ;;
-        7) install_prerequisites ;;
-        8) exit 0 ;;
-        *) die "Invalid selection." ;;
+        7)
+            install_prerequisites
+            ;;
+        8)
+            update_core
+            ;;
+        9)
+            exit 0
+            ;;
+        *)
+            die "Invalid selection."
+            ;;
     esac
 }
+
+# ==========================================================
+# ENTRY POINT
+# ==========================================================
 
 case "${1:-}" in
     apply)
